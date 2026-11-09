@@ -74,8 +74,10 @@ hace minutos.)
 ```
 ironfish/src/networks/definitions/mainnet.ts
   id: 1
-  genesis hash: 00000000000045885508f3c1455d676fe8749433dc71a748d07719fdde39aeb2
-  genesis noteSize: 75, timestamp 1682006400000
+  checkpoint hardfork-1: seq 503338 -> 00000000000045885508f3c1455d676fe8749433dc71a748d07719fdde39aeb2
+  genesis: seq 1, noteSize 75, timestamp 1682006400000, graffiti "genesis"
+  (el hash del bloque génesis NO está literal en el repo; se deriva de MAINNET_GENESIS.header.
+   El hash 0000000000004588… de arriba es el checkpoint de la altura 503338, no el génesis.)
   genesisSupplyInIron: 42000000
   bootstrap: 1.main.bn.ironfish.network, 2.main.bn.ironfish.network
 ironfish-rust/src/assets/asset_identifier.rs:10

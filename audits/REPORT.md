@@ -54,7 +54,7 @@ Detalle completo en la sección 4. Estado del requisito previo de clonado en la 
 
 | Componente live | Identificador | Repo / ruta | Commit/artefacto |
 |---|---|---|---|
-| Cadena mainnet | génesis `00000000000045885508f3c1455d676fe8749433dc71a748d07719fdde39aeb2`, `network id 1`, `noteSize` génesis 75, `genesisSupplyInIron` 42.000.000 | `ironfish/src/networks/definitions/mainnet.ts` | `b442f9b5…` |
+| Cadena mainnet | `network id 1`; génesis: secuencia 1, timestamp 1682006400000, graffiti `genesis`, `noteSize` 75, `genesisSupplyInIron` 42.000.000, hash **no literal en el repo** (se deriva de `MAINNET_GENESIS.header`); checkpoint hardfork-1 = altura **503.338**, hash `00000000000045885508f3c1455d676fe8749433dc71a748d07719fdde39aeb2` | `ironfish/src/networks/definitions/mainnet.ts:9-45` | `b442f9b5…` |
 | Activo nativo IRON (asset id) | `51f33a2f14f92735e562dc658a5639279ddca3d5079a6d1242b2a588a9cbf44c` | `ironfish-rust/src/assets/asset_identifier.rs:10` | `b442f9b5…` |
 | Árbol de notas (consenso) | `MerkleTree{depth:32, defaultValue: Buffer.alloc(32), name:'n'}` | `ironfish/src/blockchain/blockchain.ts:186` | `b442f9b5…` |
 | Verificación de spend | `Verifier.verifySpend` → `chain.notes.pastRoot(spend.size)` | `ironfish/src/consensus/verifier.ts:482-500` | `b442f9b5…` |
@@ -212,14 +212,32 @@ Inventario ajeno medido:
 | Recompensa de bloque / miner fee (`verifier.ts:47-160`) | Chequeo exacto: `minersFee.fee() === -(miningReward(seq) + Σfees)`, fees ≥ `minFee` y ≥ 0. Sin inflación. |
 | Mints de assets (`verifyMintOwnersIncremental`, `verifier.ts:595-680`) | Owner debe ser creador/owner actual; transferencia explícita. No permite acuñar el nativo. |
 | Burns (`verifyBurns`) | `NATIVE_BURN` rechazado. |
-| Balance de valor (`ironfish-rust/src/transaction/mod.rs`, `value_balances.rs`) | Suma por spend/nota con overflow checks; correcto. |
+| Balance de valor (`ironfish-rust/src/transaction/mod.rs`, `value_balances.rs`) | `ValueBalances` sólo se usa al **construir** la tx (`proposed.rs`); en verificación la conservación la impone la firma de binding (§5.1). Correcto. |
 | Notas de valor 0 y anchor libre (`spend.rs`: `(cur − rt)·value = 0`) | Bypass real del chequeo de raíz **sólo** para valor 0 ⇒ no aporta valor; heredado del diseño Sapling. No crítico. |
 | Resto del parche Merkle (índice de duplicados tras `truncate`, contadores u32, `depth` inválido, caché de pastRoot) | Estado local del nodo/reorg; sin delta de valor ajeno. |
 | DEX/contratos en Iron Fish | La L1 no tiene smart contracts; no hay pools ni vaults on-chain de IRON. El único inventario ajeno on-chain en Iron Fish es USDC puenteado de ChainPort (no comprable con IRON: no hay mercado). |
 | Faucet / testnet | Sin TVL relevante. |
+
+### 5.1 Segundo barrido (auth de mints, conservación de valor, generadores, cabecera/dificultad)
+
+Pasada adicional sobre los caminos restantes de `v2.12.0`. **No produce ningún crítico**; se documenta el porqué de cada uno para que el descarte sea verificable.
+
+| Camino | Qué se comprobó (código) | Hecho que lo mata |
+|---|---|---|
+| Acuñar un asset existente (p.ej. el USDC puenteado `8e36e31d…`) | `mints.rs:225-316` (4 public inputs: `rk`,`owner`), `MintDescription::verify_signature` (RedDSA sobre `rk‖hash`), `verifier.ts:595-680` (`owner` = creador o owner en cadena) | El proof de mint acredita conocimiento de la clave de `owner` y la firma cubre el hash de la tx; cambiar `owner` invalida el proof. `enableAssetOwnership: null` en mainnet sólo fija **V1**, y V1 **no puede serializar** `transfer_ownership_to` (`mints.rs:308-345`, `version.rs:60-63`): no hay robo de propiedad. El chequeo de owner es incondicional en `verifyBlockConnect`, no depende de ese flag. |
+| Colisión de `asset id` / usar el generador nativo | `verify_valid_asset` recalcula `id = blake2s(creator‖name‖metadata‖nonce)` **dentro** del circuito de mint | Para que el balance use el generador nativo haría falta una preimagen del id nativo; si el campo `id` ≠ recalculado, el `cv` del proof usa otro generador y la firma de binding no verifica. |
+| Conservación de valor, fee, mints y burns | `transaction/mod.rs:240-350`: `bvk = Σcv_spend − Σcv_output`; `calculate_value_balance` resta `fee·G` y suma/resta mints/burns; `verify_binding_signature` exige RedDSA con base `R` sobre ese punto | La firma sólo existe si el atacante conoce el dlog del punto; los términos de valor se cancelan únicamente si cada asset suma 0 neto (generadores hash-to-curve independientes). `fee_to_point` rechaza `i64::MIN`. Verificado que mints/burns **no** se cuentan dos veces (no están en `bvk`). |
+| Generador de asset en el lado spend (`assert_valid_asset_generator` sólo en `output.rs:236`) | `spend.rs:265-300,346-372`: el circuito testifica `cv.asset_generator`, lo incluye en `note_contents`, deriva `cm` y arranca el auth path en `cm.get_u()` | No falta restricción: en un spend no hay campo `asset_id`. El asset queda fijado por el camino de Merkle (§4); cambiar el generador cambia `cm` y rompe el ancla. El chequeo explícito sólo hace falta donde se **crea** un id (output/mint). |
+| Manipular `noteSize` para forzar raíces viejas | `blockheader.ts:196-210` (`serialize()` = 180 B, sin `noteSize` ni `work`); `blockchain.ts:1262-1285` (`prevNotesSize` debe igualar el tamaño real) | `noteSize`/`work` no se transmiten ni entran en el hash: cada nodo los deriva (`prev + counts().notes`). No es un campo elegible por el minero. |
+| Time-warp / bajar dificultad | `mainnet.ts:10-20` (`allowedBlockFutureSeconds: 15`, bucket 10 s), `verifier.ts:172-236`, `target.ts:70-115` | Timestamp ≤ `now+15 s` y estrictamente creciente desde la altura 503.338; ajuste de ±1/2048 por bucket ⇒ como máximo ~0,1 % de dificultad por bloque. No hay colapso. |
+| Checkpoints | `mainnet.ts:21-26`, `blockchain.ts:288-297,546-547,761` | Único checkpoint = altura **503.338**, hash `0000000000004588…`; sólo bloquea reorgs por debajo (`CHECKPOINT_REORG`). **Corrección de un dato previo de este informe: ese hash es el checkpoint de hardfork-1, no el génesis** (el hash del génesis no está literal en el repo). |
+| Mempool | `verifier.ts:243-300` | No valida `root` ni duplicados intra-tx, pero el bloque sí (`verifyConnectedBlock` + `verifyInternalNullifiers`). Sólo spam, no valor. |
+| `truncate`/reorg y nullifiers | `blockchain.ts:1315-1320`, `NullifierSet` | Desconectar trunca el árbol y borra nullifiers; el doble gasto por reorg exige reescribir >1,3 M de bloques de PoW. |
 
 ---
 
 ## 6. Conclusión operativa
 
 El único crítico que pasa los cuatro criterios es el **alias de posición del árbol de notas**. Está en la release desplegada (`v2.12.0`), es permissionless, produce inflación sin cota del nativo y ya fue ejecutado contra el puente (2.787.953.680 wIRON en Base vs 76.993.394,75 IRON). El fix existente (`c5c3c22b`, 2026-10-29) **no es un parche de mainnet**: cambia las raíces de consenso y sólo regenera el génesis de devnet, por lo que el estado desplegado sigue siendo incompatible y no puede migrarse sin una cadena nueva o un circuito nuevo con nuevos parámetros. Hoy el delta realizable está limitado a los venues supervivientes (Gate IRON/USDT, ~1,8 k USD/24 h, mcap ~0,67 M USD); la dilución potencial es del 100% de la oferta.
+
+Un segundo barrido (§5.1) sobre autorización de mints y propiedad de assets, conservación de valor y generadores, `noteSize`, dificultad/timestamps, checkpoints, mempool y reorgs **no encontró ningún crítico adicional** ni una segunda vía permissionless de crear valor. Los contratos y attesters del puente ChainPort en Ethereum/Base no están en ningún repo de la fundación (el repo sólo contiene el CLI que construye el depósito), así que esa superficie queda fuera de alcance por falta de código clonable, no por descarte.
